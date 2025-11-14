@@ -1,0 +1,358 @@
+<!doctype html>
+<html lang="hi">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>PDF ? ID Card Converter (Hindi/Eng OCR)</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 12px; }
+    .row { display:flex; gap:12px; align-items:flex-start; }
+    #viewer { border:1px solid #ccc; width:640px; height:900px; position:relative; }
+    canvas { display:block; max-width:100%; }
+    .controls { width:420px; }
+    .box { position:absolute; border:2px dashed #ff6f00; pointer-events:none; }
+    .cropInstruction { font-size:13px; color:#555; margin-bottom:6px; }
+    button { margin:6px 6px 6px 0; padding:8px 12px; }
+    .card { width:360px; border:1px solid #333; padding:12px; border-radius:8px; background:#fff; }
+    .card .photo { width:100px; height:120px; object-fit:cover; border:1px solid #999; }
+    .field { margin:6px 0; font-size:14px; }
+    pre.ocr { background:#f4f4f4; padding:8px; max-height:160px; overflow:auto; }
+  </style>
+  <!-- pdf.js CDN -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.9.179/pdf.min.js"></script>
+  <!-- tesseract.js CDN -->
+  <script src="https://unpkg.com/tesseract.js@4.0.2/dist/tesseract.min.js"></script>
+  <!-- html2canvas + jspdf for download -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+</head>
+<body>
+  <h2>PDF ? ID Card Converter (Hindi + English OCR)</h2>
+
+  <div class="row">
+    <div id="viewer">
+      <div style="padding:8px;">
+        <input type="file" id="fileInput" accept="application/pdf,image/*" />
+        <select id="pageSelect" style="margin-left:8px;"></select>
+      </div>
+      <div id="canvasWrap" style="position:relative;">
+        <canvas id="pdfCanvas"></canvas>
+        <!-- visual crop overlays -->
+        <div id="photoBox" class="box" style="display:none;"></div>
+        <div id="textBox" class="box" style="display:none;"></div>
+      </div>
+      <div style="padding:8px;">
+        <div class="cropInstruction">1) PDF ????? ???? ? 2) ??? ????? ? 3) ???? ?? ????? ???? Photo area ?? Text area ????? ? 4) OCR ?? Generate ????</div>
+        <button id="startCropBtn">Start Photo Crop</button>
+        <button id="startTextCropBtn">Start Text Crop</button>
+        <button id="runOcrBtn">Run OCR on Text Area</button>
+        <button id="generateBtn">Generate ID Card</button>
+        <button id="downloadPngBtn">Download PNG</button>
+        <button id="downloadPdfBtn">Download PDF</button>
+      </div>
+    </div>
+
+    <div class="controls">
+      <h3>OCR Output</h3>
+      <pre id="ocrText" class="ocr">OCR ?????? ???? ????...</pre>
+
+      <h3>Generated ID Card Preview</h3>
+      <div id="cardArea" class="card">
+        <div style="display:flex; gap:12px;">
+          <img id="cardPhoto" class="photo" src="" alt="Photo" />
+          <div>
+            <div class="field"><strong id="nameField">???: —</strong></div>
+            <div class="field">Father/Husband: <span id="fatherField">—</span></div>
+            <div class="field">Gender: <span id="genderField">—</span></div>
+            <div class="field">Reg. No: <span id="regField">—</span></div>
+            <div class="field">Mobile: <span id="mobileField">—</span></div>
+          </div>
+        </div>
+        <hr/>
+        <div style="font-size:12px; color:#444;" id="extraFields">????????: —</div>
+      </div>
+    </div>
+  </div>
+
+<script>
+(async function(){
+  // pdf.js setup
+  const pdfjsLib = window['pdfjs-dist/build/pdf'] || window.pdfjsLib;
+  pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.9.179/pdf.worker.min.js';
+
+  const fileInput = document.getElementById('fileInput');
+  const pageSelect = document.getElementById('pageSelect');
+  const pdfCanvas = document.getElementById('pdfCanvas');
+  const ctx = pdfCanvas.getContext('2d');
+  let pdfDoc = null, currentPage = 1, scale = 1.3;
+
+  // crop UI state
+  let cropping = null; // 'photo' or 'text' or null
+  let startPos = null;
+  const photoBox = document.getElementById('photoBox');
+  const textBox = document.getElementById('textBox');
+
+  // store crop rectangles in canvas coordinates
+  let photoRect = null, textRect = null;
+  let lastRenderedImageDataUrl = null; // full page image
+
+  // load uploaded file (pdf or image)
+  fileInput.addEventListener('change', async (e)=>{
+    const f = e.target.files[0];
+    if(!f) return;
+    if(f.type === 'application/pdf') {
+      const data = await f.arrayBuffer();
+      pdfDoc = await pdfjsLib.getDocument({data}).promise;
+      pageSelect.innerHTML = '';
+      for(let i=1;i<=pdfDoc.numPages;i++){
+        const opt = document.createElement('option'); opt.value=i; opt.text = 'Page '+i;
+        pageSelect.appendChild(opt);
+      }
+      currentPage = 1;
+      pageSelect.value = '1';
+      renderPage(1);
+    } else if (f.type.startsWith('image/')) {
+      // single image as page
+      pdfDoc = null;
+      pageSelect.innerHTML = '<option value="1">Image</option>';
+      pageSelect.value = '1';
+      const img = new Image();
+      img.src = URL.createObjectURL(f);
+      img.onload = ()=>{
+        pdfCanvas.width = img.width; pdfCanvas.height = img.height;
+        ctx.clearRect(0,0,pdfCanvas.width,pdfCanvas.height);
+        ctx.drawImage(img,0,0);
+        lastRenderedImageDataUrl = pdfCanvas.toDataURL('image/png');
+      };
+    } else {
+      alert('????? PDF ?? Image ????? ??????');
+    }
+  });
+
+  pageSelect.addEventListener('change', ()=> {
+    const p = parseInt(pageSelect.value);
+    if(!isNaN(p) && pdfDoc) { renderPage(p); }
+  });
+
+  async function renderPage(num) {
+    if(!pdfDoc) return;
+    const page = await pdfDoc.getPage(num);
+    const viewport = page.getViewport({scale});
+    pdfCanvas.width = viewport.width;
+    pdfCanvas.height = viewport.height;
+    const renderContext = {
+      canvasContext: ctx,
+      viewport: viewport
+    };
+    await page.render(renderContext).promise;
+    // cache image
+    lastRenderedImageDataUrl = pdfCanvas.toDataURL('image/png');
+    // reset crops
+    photoBox.style.display = 'none'; textBox.style.display = 'none';
+    photoRect = textRect = null;
+  }
+
+  // cropping (drag on canvas)
+  const canvasWrap = document.getElementById('canvasWrap');
+  pdfCanvas.style.cursor = 'crosshair';
+
+  pdfCanvas.addEventListener('mousedown', (ev)=>{
+    if(!cropping) return;
+    startPos = getMousePos(ev);
+    // show initial box
+    updateTempBox(startPos.x, startPos.y, 2, 2);
+    pdfCanvas.addEventListener('mousemove', onMouseMove);
+    window.addEventListener('mouseup', onMouseUp);
+  });
+
+  function onMouseMove(ev) {
+    const p = getMousePos(ev);
+    const x = Math.min(startPos.x, p.x), y = Math.min(startPos.y, p.y);
+    const w = Math.abs(p.x - startPos.x), h = Math.abs(p.y - startPos.y);
+    updateTempBox(x,y,w,h);
+  }
+
+  function onMouseUp(ev) {
+    const p = getMousePos(ev);
+    const x = Math.min(startPos.x, p.x), y = Math.min(startPos.y, p.y);
+    const w = Math.abs(p.x - startPos.x), h = Math.abs(p.y - startPos.y);
+    finalizeBox(x,y,w,h);
+    pdfCanvas.removeEventListener('mousemove', onMouseMove);
+    window.removeEventListener('mouseup', onMouseUp);
+    startPos = null;
+    cropping = null;
+  }
+
+  function getMousePos(evt) {
+    const rect = pdfCanvas.getBoundingClientRect();
+    const x = Math.round((evt.clientX - rect.left) * (pdfCanvas.width / rect.width));
+    const y = Math.round((evt.clientY - rect.top) * (pdfCanvas.height / rect.height));
+    return {x,y};
+  }
+
+  function updateTempBox(x,y,w,h) {
+    const left = (x / pdfCanvas.width) * 100 + '%';
+    const top = (y / pdfCanvas.height) * 100 + '%';
+    const width = (w / pdfCanvas.width) * 100 + '%';
+    const height = (h / pdfCanvas.height) * 100 + '%';
+    const target = (cropping === 'photo') ? photoBox : textBox;
+    target.style.display = 'block';
+    target.style.left = left; target.style.top = top; target.style.width = width; target.style.height = height;
+  }
+
+  function finalizeBox(x,y,w,h) {
+    if(cropping === 'photo') {
+      photoRect = {x,y,w,h};
+      photoBox.style.left = (x/pdfCanvas.width)*100 + '%';
+      photoBox.style.top = (y/pdfCanvas.height)*100 + '%';
+      photoBox.style.width = (w/pdfCanvas.width)*100 + '%';
+      photoBox.style.height = (h/pdfCanvas.height)*100 + '%';
+    } else if (cropping === 'text') {
+      textRect = {x,y,w,h};
+      textBox.style.left = (x/pdfCanvas.width)*100 + '%';
+      textBox.style.top = (y/pdfCanvas.height)*100 + '%';
+      textBox.style.width = (w/pdfCanvas.width)*100 + '%';
+      textBox.style.height = (h/pdfCanvas.height)*100 + '%';
+    }
+  }
+
+  document.getElementById('startCropBtn').addEventListener('click', ()=> {
+    cropping = 'photo';
+    alert('Canvas ?? Photo area ????? ???? (mousedown ? drag ? mouseup)?');
+  });
+  document.getElementById('startTextCropBtn').addEventListener('click', ()=> {
+    cropping = 'text';
+    alert('Canvas ?? Text area ????? ???? (mousedown ? drag ? mouseup)?');
+  });
+
+  // Run OCR on selected textRect
+  document.getElementById('runOcrBtn').addEventListener('click', async ()=>{
+    if(!textRect) return alert('????? ???? Text Area ????? ?????');
+    // crop image from canvas
+    const tmp = document.createElement('canvas');
+    tmp.width = textRect.w; tmp.height = textRect.h;
+    const tctx = tmp.getContext('2d');
+    tctx.drawImage(pdfCanvas, textRect.x, textRect.y, textRect.w, textRect.h, 0, 0, textRect.w, textRect.h);
+    const dataUrl = tmp.toDataURL('image/png');
+    document.getElementById('ocrText').textContent = 'OCR ?? ??? ?? — ????? ????????? ????... (?? ??? ??? ?? ???? ??)';
+    // Use Tesseract (hin+eng)
+    const worker = Tesseract.createWorker({
+      logger: m => console.log(m)
+    });
+    await worker.load();
+    await worker.loadLanguage('hin+eng');
+    await worker.initialize('hin+eng');
+    const { data: { text } } = await worker.recognize(dataUrl);
+    await worker.terminate();
+    document.getElementById('ocrText').textContent = text;
+  });
+
+  // Generate ID card HTML using OCR text & photo crop
+  document.getElementById('generateBtn').addEventListener('click', async ()=>{
+    // set photo
+    if(photoRect) {
+      const pc = document.createElement('canvas'); pc.width=photoRect.w; pc.height=photoRect.h;
+      const pctx = pc.getContext('2d');
+      pctx.drawImage(pdfCanvas, photoRect.x, photoRect.y, photoRect.w, photoRect.h, 0,0,photoRect.w,photoRect.h);
+      const photoDataUrl = pc.toDataURL('image/png');
+      document.getElementById('cardPhoto').src = photoDataUrl;
+    } else {
+      document.getElementById('cardPhoto').src = '';
+    }
+
+    // parse OCR
+    const raw = document.getElementById('ocrText').textContent || '';
+    // naive parsing heuristics: lines with "Name", "???", digits for phone etc.
+    const lines = raw.split('\n').map(s=>s.trim()).filter(Boolean);
+    let name='—', father='—', gender='—', reg='—', mobile='—', extra=[];
+
+    for(const ln of lines) {
+      const L = ln.replace(/\u200E/g,'').trim();
+      if(/???|Name/i.test(L) && !/????|Father|Husband/i.test(L)) {
+        const val = L.split(/???|Name/i).pop().replace(':','').trim();
+        if(val) name = val;
+      } else if(/????|Father|Husband|???/i.test(L)) {
+        const val = L.split(/????|Father|Husband|???/i).pop().replace(':','').trim();
+        if(val) father = val;
+      } else if(/\b(MALE|FEMALE|Male|Female|?????|??????|?????|???|????)\b/i.test(L)) {
+        gender = (/Male|MALE|?????/i.test(L))? 'Male/?????' : 'Female/?????';
+      } else if(/\d{10}/.test(L)) {
+        const m = L.match(/\d{10}/);
+        mobile = m? m[0] : mobile;
+      } else if(/\b(B|b)\d{2,}|\d{6,}|\bReg|Registration|???????\b/.test(L)) {
+        // try to capture reg numbers
+        reg = reg === '—' ? L : reg + ' | ' + L;
+      } else {
+        extra.push(L);
+      }
+    }
+
+    // fallback: if no explicit "???" found, try first long line
+    if(name==='—' && lines.length>0) {
+      const candidate = lines.find(l => l.length>3 && !/\d{6,}/.test(l));
+      if(candidate) name = candidate;
+    }
+
+    document.getElementById('nameField').textContent = '???: ' + name;
+    document.getElementById('fatherField').textContent = father;
+    document.getElementById('genderField').textContent = gender;
+    document.getElementById('regField').textContent = reg;
+    document.getElementById('mobileField').textContent = mobile;
+    document.getElementById('extraFields').textContent = extra.join(' | ');
+  });
+
+  // download PNG of the card
+  document.getElementById('downloadPngBtn').addEventListener('click', async ()=>{
+    const card = document.getElementById('cardArea');
+    const canvas = await html2canvas(card, {scale:2});
+    const url = canvas.toDataURL('image/png');
+    const a = document.createElement('a');
+    a.href = url; a.download = 'id_card.png'; a.click();
+  });
+
+  // download PDF (A4 small)
+  document.getElementById('downloadPdfBtn').addEventListener('click', async ()=>{
+    const { jsPDF } = window.jspdf;
+    const card = document.getElementById('cardArea');
+    const canvas = await html2canvas(card, {scale:2});
+    const imgData = canvas.toDataURL('image/png');
+    const pdf = new jsPDF({
+      orientation: 'portrait',
+      unit: 'mm',
+      format: 'a4'
+    });
+    // place the small card near top-left, scale appropriately
+    const imgProps = pdf.getImageProperties(imgData);
+    const pdfWidth = 80; // small width in mm
+    const ratio = imgProps.width / imgProps.height;
+    const pdfHeight = pdfWidth / ratio;
+    pdf.addImage(imgData, 'PNG', 20, 20, pdfWidth, pdfHeight);
+    pdf.save('id_card.pdf');
+  });
+
+  // helper: if user wants to quickly auto-fill OCR by reading whole page
+  async function runOcrWholePage() {
+    const dataUrl = lastRenderedImageDataUrl;
+    if(!dataUrl) return;
+    document.getElementById('ocrText').textContent = 'OCR ?? ??? ?? (????? ???)...';
+    const worker = Tesseract.createWorker();
+    await worker.load();
+    await worker.loadLanguage('hin+eng');
+    await worker.initialize('hin+eng');
+    const { data: { text } } = await worker.recognize(dataUrl);
+    await worker.terminate();
+    document.getElementById('ocrText').textContent = text;
+  }
+
+  // optional: keyboard shortcuts
+  // Shift+P -> start photo crop, Shift+T -> start text crop, Shift+O -> ocr whole page
+  window.addEventListener('keydown', (e)=>{
+    if(e.shiftKey && e.key.toLowerCase()==='p') { cropping='photo'; alert('Photo crop mode'); }
+    if(e.shiftKey && e.key.toLowerCase()==='t') { cropping='text'; alert('Text crop mode'); }
+    if(e.shiftKey && e.key.toLowerCase()==='o') { runOcrWholePage(); }
+  });
+
+})(); // IIFE
+</script>
+</body>
+</html>
