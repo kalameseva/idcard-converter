@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <title>ID Card Converter</title>
+
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background: #f5f6fa;
+        }
+
+        .container {
+            max-width: 500px;
+            margin: auto;
+            background: white;
+            padding: 20px;
+            border-radius: 10px;
+            box-shadow: 0 4px 10px rgba(0, 0, 0, 0.1);
+        }
+
+        #idcard-frame {
+            width: 300px;
+            height: 180px;
+            border: 2px solid #000;
+            margin: 20px auto;
+            overflow: hidden;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            background: #ddd;
+        }
+
+        #preview-img {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+
+        button {
+            padding: 10px 20px;
+            border: none;
+            background: #007bff;
+            color: white;
+            font-size: 16px;
+            border-radius: 5px;
+            cursor: pointer;
+        }
+
+        button:hover {
+            background: #0056b3;
+        }
+    </style>
+
+    <!-- PDF.js library -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.12.313/pdf.min.js"></script>
+</head>
+
+<body>
+
+<div class="container">
+    <h2>ID Card Converter</h2>
+
+    <label><b>Upload PDF:</b></label>
+    <input type="file" id="pdfUpload" accept="application/pdf"><br><br>
+
+    <div id="idcard-frame">
+        <img id="preview-img" src="">
+    </div>
+
+    <center>
+        <button onclick="downloadImage()">Download ID Card</button>
+    </center>
+</div>
+
+<script>
+    document.getElementById("pdfUpload").addEventListener("change", function (e) {
+        let file = e.target.files[0];
+        if (!file) return;
+
+        let fileReader = new FileReader();
+
+        fileReader.onload = function () {
+            let pdfData = new Uint8Array(this.result);
+
+            pdfjsLib.getDocument(pdfData).promise.then(function (pdf) {
+                pdf.getPage(1).then(function (page) {
+                    var viewport = page.getViewport({ scale: 2 });
+
+                    var canvas = document.createElement("canvas");
+                    var context = canvas.getContext("2d");
+                    canvas.height = viewport.height;
+                    canvas.width = viewport.width;
+
+                    page.render({
+                        canvasContext: context,
+                        viewport: viewport
+                    }).promise.then(function () {
+                        let imgURL = canvas.toDataURL();
+                        document.getElementById("preview-img").src = imgURL;
+                    });
+                });
+            });
+        };
+
+        fileReader.readAsArrayBuffer(file);
+    });
+
+    function downloadImage() {
+        let img = document.getElementById("preview-img").src;
+        let a = document.createElement("a");
+        a.href = img;
+        a.download = "id_card.png";
+        a.click();
+    }
+</script>
+
+</body>
+</html>
